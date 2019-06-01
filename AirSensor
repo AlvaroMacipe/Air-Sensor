@@ -1,0 +1,434 @@
+#include <ESP8266WiFi.h> // Libreria para conectar Wifi
+#include <Wire.h> // Libreria para configurar los puertos Base, D2 y D1
+#include <LiquidCrystal_I2C.h> // Libreria para manejar LCD
+#include "LedControlMS.h" // Manejar la matriz 8x8
+
+LiquidCrystal_I2C lcd(0x27, 16, 2); // Protocolo LCD
+
+#define         A                            (12)
+#define         B                            (13)
+#define         C                            (15)
+#define         PWM_PIN                      (3)
+#define         Din                          (14)
+#define         CS                           (2)
+#define         CLK                          (0)
+#define         SDA                          (D2)
+#define         SLC                          (D1)
+#define         A0                           (A0) // Entrada analógica.
+
+LedControl lc = LedControl(Din, CLK, CS, 0); // Instancia de LedControl
+
+const char *ssid = "Zombie";
+const char *password = "4527C677";
+
+const char *ssidm = "Macipe";
+const char *passwordm = "uwu23uwu";
+
+WiFiServer server(80);
+
+double CO2, CH4, CO, NOx, NH3;
+float voltaje, RS;
+int nivel, lvl = 0;
+
+void setup() {
+ Serial.begin(9600);
+ pinMode(A, OUTPUT);
+ pinMode(B, OUTPUT);
+ pinMode(C, OUTPUT);
+ pinMode(PWM_PIN, OUTPUT);
+ ini_lcd();                 // Iniciamos la LCD
+ ini_matriz();              // Iniciamos la MATRIZ 8x8
+ conectar();                // Conectamos con el servidor WEB
+ lcd.clear();               
+ lcd.setCursor(0, 0);       
+ lcd.print("Calibrating...");
+ PWM();
+ //delay(5000);
+}
+
+void loop() {
+  lectura_datos();          // Leemos los datos con el multiplexor
+  imp_MQ135();              // LCD CO2
+  web();                    // Actualizamos la WEB
+  imp_MQ4();                // LCD CH4
+  print_matriz();           // Representamos gráficos en matriz
+  imp_MQ7();                // LCD CO
+}
+
+/****************** INI_LCD ********************************************************
+Input:   -
+Output:  -
+Remarks: Inicializamos la LCD
+************************************************************************************/ 
+void ini_lcd() {
+  Wire.begin(D2, D1); // D1 = SCL | D2 = SDA
+  lcd.init(); // Iniciamos el LCD
+  lcd.backlight(); // Iluminamos la pantalla.
+  lcd.clear();
+  lcd.setCursor(0, 0); // Cursor 0 , Linea 0
+  lcd.print("Welcome to the");
+  lcd.setCursor(0, 1); // Cursor 0 , Linea 1
+  lcd.print("Air Sensor");
+}
+
+/****************** INI_MATRIZ *****************************************************
+Input:   -
+Output:  -
+Remarks: Inicializamos la MATRZ 8X8 y jugamos con ella
+************************************************************************************/ 
+void ini_matriz() {
+  lc.shutdown(0, false); // Activar la matriz
+  lc.clearDisplay(0);
+  // Jugamos con la MATRIZ
+  // happy face
+  byte hf[8]= {B00111100, B01000010, B10011001, B10100101, B10000001, B10100101, B01000010, B00111100};
+  for(int fila=0;fila<8;fila++) {
+    lc.setColumn(0, fila, hf[fila]);
+  }
+  delay(3000);
+  for(int row=0;row<=3;row++) {
+    for(int col=0;col<8;col++) {
+        delay(50);
+        lc.setLed(0,row,col,true);
+        delay(50);
+        lc.setLed(0,row,col,false);
+    }
+  }
+  for(int row=7;row>=4;row--) {
+    for(int col=0;col<8;col++) {
+        delay(50);
+        lc.setLed(0,row,col,true);
+        delay(50);
+        lc.setLed(0,row,col,false);
+    }
+  }
+  byte boom[4] = {B00011000, B00111100, B01111110, B11111111};
+  int i;
+  for(int j = 0; j < 3; j++){
+    i = 0;
+    lc.setColumn(0, 3, boom[i]);
+    lc.setColumn(0, 4, boom[i]);
+    delay(500);
+    i++;
+    lc.setColumn(0, 2, boom[i]);
+    lc.setColumn(0, 3, boom[i]);
+    lc.setColumn(0, 4, boom[i]);
+    lc.setColumn(0, 5, boom[i]);
+    delay(500);
+    i++;
+    lc.setColumn(0, 1, boom[i]);
+    lc.setColumn(0, 2, boom[i]);
+    lc.setColumn(0, 3, boom[i]);
+    lc.setColumn(0, 4, boom[i]);
+    lc.setColumn(0, 5, boom[i]);
+    lc.setColumn(0, 6, boom[i]);
+    delay(500);
+    i++;
+    lc.setColumn(0, 0, boom[i]);
+    lc.setColumn(0, 1, boom[i]);
+    lc.setColumn(0, 2, boom[i]);
+    lc.setColumn(0, 3, boom[i]);
+    lc.setColumn(0, 4, boom[i]);
+    lc.setColumn(0, 5, boom[i]);
+    lc.setColumn(0, 6, boom[i]);
+    lc.setColumn(0, 7, boom[i]);
+    delay(200);
+    lc.clearDisplay(0);
+  }
+}
+
+/****************** CONNECT ********************************************************
+Input:   -
+Output:  -
+Remarks: Conectamos con nuestro servidor web -> http://192.168.1.108/
+************************************************************************************/ 
+void conectar(){
+  //WiFi.mode(WIFI_STA);
+  //WiFi.config(ip, gateway, subnet);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED){
+    delay(500);
+  }
+  Serial.println("Wifi connected");
+  server.begin();
+  Serial.print("Esta es la IP para conectar: ");
+  Serial.print("http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("/");
+}
+
+/****************** SERVIDOR ********************************************************
+Input:   -
+Output:  -
+Remarks: Subimos los datos al servidor web
+************************************************************************************/ 
+void web() {
+  // Consulta si se ha conectado algún cliente.
+  WiFiClient client = server.available();
+  if (!client) {
+    return;
+  }
+ 
+  // Espera hasta que el cliente envíe datos.
+  Serial.println("Nuevo cliente.");
+  while(!client.available()){
+    delay(1);
+  }
+ 
+  // Página WEB. ///////////////////////////////
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html");
+  client.println(""); //  Comillas importantes.
+  client.println("<!DOCTYPE HTML>");
+  client.println("<html>");
+  client.println("<head><meta charset=utf-8></head>");
+  client.println("<body><font face='Arial'><center><h1>Servidor web monitorización de Aire.</h1>");
+  client.println("<h2><font color='#009999'>Álvaro Macipe - LDE</font></h2>");
+  client.println("<h3>Air Pollution Monitoring System.</h3>");
+  client.println("<br><br>");
+  client.println("<img src='https://www.sostenibilidad.com/media/560195/efectos-contaminacion-atmosferica-salud.jpg'><br>");
+  client.println("Dioxido de carbono (CO2):");
+  client.println(CO2);                   // Mostramos las ppm
+  client.println("ppm  //  ");
+  client.println(sensor_MQ135()*44.01/24.45);              // Mostramos los mg/m3
+  client.println("mg/m3");
+  client.println("<br><br>");
+  client.println("Monoxido de carbono (CO):");
+  client.println(CO);                           // Mostramos los ppm
+  client.println("ppm  //  ");  
+  if(CO < 30) client.println("Estamos por debajo del umbral... SEGUROS");
+  else client.println("Estamos por encima del umbral permitido... CUIDADO! ");
+  client.println("<br><br>");
+  client.println("Metano (CH4):");
+  client.println(CH4);                          // Mostramos los ppm
+  client.println("ppm");
+  client.println("<br><br>");
+  client.println("<button>Álvaro Macipe </button>");
+  client.println("<button>LDE </button>");
+//  client.println("<button>Control </button>");
+//  client.println("<a href=\"/mensaje=4\"\"><button>Ey que pasa jamaus </button></a>");
+  client.println("</font></center></body></html>");
+ 
+  Serial.println("Cliente desconectado.");
+}
+
+/****************** LECTURA DATOS ***************************************************
+Input:   -
+Output:  -
+Remarks: Valores de los bita del multiplexor para obtener los datos de cada sensor
+************************************************************************************/
+void lectura_datos() {
+   // Leemos el CH5
+  digitalWrite(A, HIGH);
+  digitalWrite(B, LOW);
+  digitalWrite(C, HIGH);
+  sensor_MQ7();
+  delay(1000);
+  // Leemos el CH6
+  digitalWrite(A, LOW);
+  digitalWrite(B, HIGH);
+  digitalWrite(C, HIGH);
+  sensor_MQ135();
+  delay(1000);
+  // Leemos el CH7
+  digitalWrite(A, HIGH);
+  digitalWrite(B, HIGH);
+  digitalWrite(C, HIGH);
+  sensor_MQ4();
+  delay(1000);
+}
+
+/****************** LECTURA ppm MQ135 ***********************************************
+Input:   -
+Output:  ppm de CO2
+Remarks: Leemos las partes por millón de CO2 en el aire
+************************************************************************************/
+double sensor_MQ135(){
+  voltaje = analogRead(A0)*3.3/1024;
+  Serial.println("El voltaje es: ");
+  Serial.println(voltaje);
+  RS = 1000*((5 - voltaje) / voltaje);
+  Serial.println("RS: ");
+  Serial.println(RS);
+  CO2 = 245*pow(RS/45000, -2.26);       // Ro = 42000
+  NOx = 132.6*pow(RS/1100, -2.74);     // Oxidos de nitrógeno
+  //NH3 = 161.7*pow(RS/19000, -2.26);     // Amoniaco
+  Serial.print("CO2 value : ");
+  Serial.println(CO2);
+  Serial.print("NOx value : ");
+  Serial.println(NOx);
+  //Serial.print("NH3 value : ");
+  //Serial.println(NH3);
+  return CO2;
+}
+
+/****************** LECTURA ppm MQ4 *************************************************
+Input:   -
+Output:  ppm de CH4
+Remarks: Leemos las partes por millón de CH4 en el aire
+************************************************************************************/
+double sensor_MQ4() {
+  voltaje = analogRead(A0)*3.3/1024;
+  Serial.println("El voltaje es: ");
+  Serial.println(voltaje);
+  RS = 1000*((5 - voltaje) / voltaje);
+  Serial.println("RS: ");
+  Serial.println(RS);
+  CH4 = 6922*pow(RS/900, -1.91);         // COMPROBAR
+  Serial.print("CH4 value : ");
+  Serial.println(CH4);
+  return CH4;
+}
+
+/****************** LECTURA ppm MQ7 *************************************************
+Input:   -
+Output:  ppm de CO
+Remarks: Leemos las partes por millón de CO en el aire
+************************************************************************************/
+double sensor_MQ7() {
+  voltaje = analogRead(A0)*3.3/1024;
+  Serial.print("El voltaje es: ");
+  Serial.println(voltaje);
+  RS = 1000*((5 - voltaje) / voltaje);
+  Serial.print("RS: ");
+  Serial.println(RS);
+  CO = 233.9*pow(RS/500, -1.40);        // COMPROBAR la R0 = 500
+  Serial.print("CO value : ");
+  Serial.println(CO);
+  return CO;
+}
+
+/****************** CALENTAMIENTO PWM ***********************************************
+Input:   -
+Output:  -
+Remarks: Calentamos Sensor MQ7 a 5V y 1.4V
+************************************************************************************/
+void PWM(){
+  analogWrite(PWM_PIN, 1023);
+}
+
+/****************** REPRESENTACIÓN MQ135 ********************************************
+Input:   -
+Output:  Nivel de representación gráfico en matriz
+Remarks: Sacar nivel de ppm de CO2, lo normal son 400 ppm
+************************************************************************************/
+int nivelMQ135() {
+  nivel = 0;
+  lvl = CO2;
+  if(lvl < 300) nivel = 128;
+  else if(lvl < 400) nivel = 192;
+  else if(lvl < 450) nivel = 224;
+  else if(lvl < 500) nivel = 240;
+  else if(lvl < 600) nivel = 248;
+  else if(lvl < 700) nivel = 252;
+  else if(lvl < 800) nivel = 254;
+  else nivel = 255;
+  return nivel;
+}
+
+/****************** REPRESENTACIÓN MQ4 **********************************************
+Input:   -
+Output:  Nivel de representación gráfico en matriz
+Remarks: Sacar nivel de ppm de NH4, lo normal son 14 ppm TENGO QUE MODELARLO
+************************************************************************************/
+int nivelMQ4() {
+  nivel = 0;
+  lvl = CH4;
+  if(lvl < 10) nivel = 128;
+  else if(lvl < 20) nivel = 192;
+  else if(lvl < 30) nivel = 224;
+  else if(lvl < 50) nivel = 240;
+  else if(lvl < 70) nivel = 248;
+  else if(lvl < 200) nivel = 252;
+  else if(lvl < 400) nivel = 254;
+  else nivel = 255;
+  return nivel;
+}
+
+/****************** REPRESENTACIÓN MQ7 **********************************************
+Input:   -
+Output:  Nivel de representación gráfico en matriz
+Remarks: Sacar nivel de ppm de CO, lo normal son 0-3 ppm, ESTE ES UN GAS TÓXICO
+************************************************************************************/
+int nivelMQ7() {
+  nivel = 0;
+  lvl = CO;
+  if(lvl < 10) nivel = 128;
+  else if(lvl < 20) nivel = 192;
+  else if(lvl < 30) nivel = 224; // Valor umbral
+  else if(lvl < 50) nivel = 240;
+  else if(lvl < 70) nivel = 248;
+  else if(lvl < 200) nivel = 252;
+  else if(lvl < 400) nivel = 254;
+  else nivel = 255;
+  return nivel;
+}
+
+/****************** IMPRESIÓN EN LA MATRIZ ******************************************
+Input:   -
+Output:  -
+Remarks: Representamos el gráfico de barras
+************************************************************************************/
+void print_matriz() {
+//  XX 255
+//  XX 254
+//  XX 252
+//  XX 248
+//  XX 240
+//  XX 224
+//  XX 192
+//  XX 128
+  lc.setRow(0, 0, nivelMQ7());
+  lc.setRow(0, 1, nivelMQ7());
+  
+  lc.setRow(0, 3, nivelMQ4());
+  lc.setRow(0, 4, nivelMQ4());
+
+  lc.setRow(0, 6, nivelMQ135());
+  lc.setRow(0, 7, nivelMQ135());
+}
+
+/****************** IMPRESIÓN PPM LCD ***********************************************
+Input:   -
+Output:  -
+Remarks: MQ135
+************************************************************************************/
+void imp_MQ135(){ // Representar MQ135
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("CO2: ");
+  lcd.print(CO2);
+  lcd.setCursor(0, 1);
+  lcd.print("ppm");
+  delay(4000);
+}
+
+/****************** IMPRESIÓN PPM LCD ***********************************************
+Input:   -
+Output:  -
+Remarks: MQ4
+************************************************************************************/
+void imp_MQ4(){ // Representar MQ4
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("CH4: ");
+  lcd.print(CH4);
+  lcd.setCursor(0, 1);
+  lcd.print("ppm");
+  delay(4000);
+}
+
+/****************** IMPRESIÓN PPM LCD ***********************************************
+Input:   -
+Output:  -
+Remarks: MQ7
+************************************************************************************/
+void imp_MQ7(){ // Representar MQ7
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("CO: ");
+  lcd.print(CO);
+  lcd.setCursor(0, 1);
+  lcd.print("ppm");
+  delay(2000);
+}

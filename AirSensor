@@ -19,7 +19,7 @@ LiquidCrystal_I2C lcd(0x27, 16, 2); // Protocolo LCD
 LedControl lc = LedControl(Din, CLK, CS, 0); // Instancia de LedControl
 
 const char *ssid = "Zombie";
-const char *password = "4527C677";
+const char *password = "password";
 
 const char *ssidm = "Macipe";
 const char *passwordm = "uwu23uwu";
